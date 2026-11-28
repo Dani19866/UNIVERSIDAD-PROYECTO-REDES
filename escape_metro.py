@@ -26,42 +26,109 @@ class GrafoMetro:
         self.adyacencia[origen].append((destino, tiempo, linea))
 
 
+class ErrorEntrada(Exception):
+    """Error en el contenido de input.txt, con un mensaje que indica la línea del archivo."""
+
+
+def a_enteros(campos, num_linea, descripcion, minimo=None):
+    """Convierte los campos a enteros. Si alguno no es un número (o es menor que
+    'minimo'), lanza ErrorEntrada indicando la línea exacta del archivo."""
+    numeros = []
+    for campo in campos:
+        try:
+            valor = int(campo)
+        except ValueError:
+            raise ErrorEntrada(f"línea {num_linea}: '{campo}' no es un número entero ({descripcion}).")
+        if minimo is not None and valor < minimo:
+            raise ErrorEntrada(f"línea {num_linea}: el valor {valor} debe ser mayor o igual a {minimo} ({descripcion}).")
+        numeros.append(valor)
+    return numeros
+
+
+def tomar_linea(datos, idx, cantidad, descripcion):
+    """Devuelve (num_linea, campos) del dato número 'idx', verificando que exista
+    y que tenga al menos 'cantidad' campos."""
+    if idx >= len(datos):
+        raise ErrorEntrada(f"el archivo terminó antes de tiempo: faltan datos ({descripcion}).")
+    num_linea, campos = datos[idx]
+    if len(campos) < cantidad:
+        raise ErrorEntrada(f"línea {num_linea}: se esperaban {cantidad} valores ({descripcion}) y hay {len(campos)}.")
+    return num_linea, campos
+
+
 def leer_archivo(ruta):
-    """Lee input.txt ignorando comentarios (#) y retorna grafo, misión y restricciones."""
-    datos = []
+    """Lee input.txt ignorando comentarios (#) y retorna grafo, misión y restricciones.
+    Valida cada sección y lanza ErrorEntrada con la línea exacta si algo está mal."""
+    datos = []  # [(número de línea en el archivo, [campos]), ...]
     with open(ruta, "r", encoding="utf-8") as f:
-        for linea in f:
+        for num_linea, linea in enumerate(f, start=1):
             limpio = linea.split("#")[0].strip()
             if limpio:
-                datos.append(limpio.split())
+                datos.append((num_linea, limpio.split()))
 
-    n_est, n_tun = map(int, datos[0])
+    if not datos:
+        raise ErrorEntrada("el archivo está vacío.")
+
+    num, campos = tomar_linea(datos, 0, 2, "número de estaciones y de túneles")
+    n_est, n_tun = a_enteros(campos[:2], num, "número de estaciones y de túneles", minimo=1)
     grafo = GrafoMetro()
     idx = 1
 
-    for _ in range(n_est):
-        est, t_trans = map(int, datos[idx])
+    for i in range(n_est):
+        num, campos = tomar_linea(datos, idx, 2, f"la estación {i + 1} de {n_est}")
+        est, t_trans = a_enteros(campos[:2], num, "estación y tiempo de transbordo", minimo=0)
+        if est in grafo.adyacencia:
+            raise ErrorEntrada(f"línea {num}: la estación {est} está repetida.")
         grafo.agregar_estacion(est, t_trans)
         idx += 1
 
-    for _ in range(n_tun):
-        u, v, tiempo = map(int, datos[idx][:3])
-        grafo.agregar_tunel(u, v, tiempo, datos[idx][3])
+    lineas_metro = set()
+    for i in range(n_tun):
+        num, campos = tomar_linea(datos, idx, 4, f"el túnel {i + 1} de {n_tun}")
+        u, v = a_enteros(campos[:2], num, "estaciones del túnel")
+        (tiempo,) = a_enteros(campos[2:3], num, "tiempo de viaje", minimo=1)
+        for est in (u, v):
+            if est not in grafo.adyacencia:
+                raise ErrorEntrada(f"línea {num}: el túnel {u}->{v} usa la estación {est}, que no fue declarada.")
+        grafo.agregar_tunel(u, v, tiempo, campos[3])
+        lineas_metro.add(campos[3])
         idx += 1
 
-    op, oa, dp, da = map(int, datos[idx])
+    num, campos = tomar_linea(datos, idx, 4, "la misión (Origen_P Origen_A Destino_P Destino_A)")
+    op, oa, dp, da = a_enteros(campos[:4], num, "datos de la misión")
+    for nombre, est in (("origen de Pierre", op), ("origen de Amélie", oa),
+                        ("destino D1", dp), ("destino D2", da)):
+        if est not in grafo.adyacencia:
+            raise ErrorEntrada(f"línea {num}: la estación {est} ({nombre}) no fue declarada.")
     mision = {"origen_p": op, "origen_a": oa, "destino_p": dp, "destino_a": da}
     idx += 1
 
     clausuras = []
     retrasos = {}
     while idx < len(datos):
-        campos = datos[idx]
+        num, campos = datos[idx]
         tipo = campos[0].upper()
         if tipo in ("CLAUSURA", "DISPONIBILIDAD"):
-            clausuras.append((campos[1], int(campos[2]), int(campos[3])))
+            num, campos = tomar_linea(datos, idx, 4, "la restricción (DISPONIBILIDAD Línea Inicio Fin)")
+            ini, fin = a_enteros(campos[2:4], num, "minutos de la restricción", minimo=0)
+            if ini > fin:
+                raise ErrorEntrada(f"línea {num}: el minuto de inicio ({ini}) es mayor que el de fin ({fin}).")
+            linea_bloq = campos[1]
         elif tipo in ("RETRASO", "PENALIZACION"):
-            retrasos[campos[1]] = int(campos[2]) if len(campos) > 2 else 2
+            num, campos = tomar_linea(datos, idx, 2, "la penalización (PENALIZACION Línea Factor)")
+            linea_bloq = campos[1]
+        else:
+            raise ErrorEntrada(f"línea {num}: restricción desconocida '{campos[0]}' "
+                               "(se esperaba DISPONIBILIDAD o PENALIZACION).")
+
+        if linea_bloq not in lineas_metro:
+            raise ErrorEntrada(f"línea {num}: la línea de metro '{linea_bloq}' no aparece en ningún túnel.")
+
+        if tipo in ("CLAUSURA", "DISPONIBILIDAD"):
+            clausuras.append((linea_bloq, ini, fin))
+        else:
+            factor = a_enteros(campos[2:3], num, "factor de penalización", minimo=1)
+            retrasos[linea_bloq] = factor[0] if factor else 2
         idx += 1
 
     return grafo, mision, clausuras, retrasos
@@ -334,8 +401,11 @@ def main():
 
     try:
         grafo, mision, clausuras, retrasos = leer_archivo(entrada)
-    except Exception as e:
-        print(f"Error en archivo de entrada: {e}")
+    except FileNotFoundError:
+        print(f"Error: no se encontró el archivo de entrada '{entrada}'.")
+        return
+    except ErrorEntrada as e:
+        print(f"Error en archivo de entrada ({os.path.basename(entrada)}), {e}")
         return
 
     resultado, error = planificar_rutas(grafo, mision, clausuras, retrasos)
